@@ -161,6 +161,13 @@ pub struct PortMapping {
 
     /// The configuration of the timing of UDP requests made to the gateway.
     pub timeout_config: TimeoutConfig,
+
+    /// PCP options sent with the request, re-sent on renew and drop so a stateful
+    /// option (e.g. a vendor HOSTNAME binding) persists. Empty for NAT-PMP.
+    request_options: Vec<pcp::PcpOption>,
+
+    /// PCP options the gateway returned in the mapping response.
+    response_options: Vec<pcp::PcpOption>,
 }
 impl PortMapping {
     /// Attempts to map a port on the gateway using PCP first and falling back to NAT-PMP.
@@ -184,6 +191,7 @@ impl PortMapping {
             None,
             None,
             mapping_options,
+            &[],
         )
         .await
         {
@@ -228,6 +236,7 @@ impl PortMapping {
                 nonce,
                 external_ip,
             } => {
+                let request_options = self.request_options.clone();
                 *self = pcp::port_mapping(
                     pcp::BaseMapRequest::new(
                         self.gateway,
@@ -238,6 +247,7 @@ impl PortMapping {
                     Some(nonce),
                     Some(external_ip),
                     options,
+                    &request_options,
                 )
                 .await
                 .map_err(MappingFailure::from)?;
@@ -255,6 +265,7 @@ impl PortMapping {
         let protocol = self.protocol();
         let internal_port = self.internal_port();
         let mapping_type = self.mapping_type();
+        let request_options = self.request_options.clone();
 
         // Attempt to delete the port mapping on the gateway.
         match mapping_type {
@@ -276,6 +287,7 @@ impl PortMapping {
                     protocol,
                 },
                 Some(self.timeout_config),
+                &request_options,
             )
             .await
             .map_err(|e| (MappingFailure::from(e), self)),
@@ -321,6 +333,12 @@ impl PortMapping {
     #[must_use]
     pub fn mapping_type(&self) -> PortMappingType {
         self.mapping_type
+    }
+    /// The PCP options the gateway returned in the mapping response (e.g. echoed
+    /// vendor options). Empty for NAT-PMP mappings.
+    #[must_use]
+    pub fn response_options(&self) -> &[pcp::PcpOption] {
+        &self.response_options
     }
 }
 

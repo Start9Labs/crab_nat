@@ -272,8 +272,53 @@ impl BaseMapRequest {
     }
 }
 
+/// A raw PCP option (RFC 6887 §7.3): an option code plus its value bytes. Lets
+/// callers attach options the library does not model natively (e.g. vendor or
+/// experimental options); the on-wire length field and 32-bit padding are
+/// handled by the encoder/decoder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PcpOption {
+    pub code: u8,
+    pub data: Vec<u8>,
+}
+impl PcpOption {
+    /// Append this option to a request buffer (code, reserved, length, data,
+    /// zero-padded to a 32-bit boundary).
+    fn encode(&self, bb: &mut Vec<u8>) {
+        bb.push(self.code);
+        bb.push(0); // reserved
+        bb.extend_from_slice(&u16::try_from(self.data.len()).unwrap_or(u16::MAX).to_be_bytes());
+        bb.extend_from_slice(&self.data);
+        while !bb.len().is_multiple_of(4) {
+            bb.push(0);
+        }
+    }
+}
+
+/// Parse the trailing PCP options that follow a response's fixed opcode payload.
+/// Stops at the first truncated option rather than erroring.
+fn parse_options(mut tail: &[u8]) -> Vec<PcpOption> {
+    let mut out = Vec::new();
+    while tail.len() >= 4 {
+        let code = tail[0];
+        let len = u16::from_be_bytes([tail[2], tail[3]]) as usize;
+        if 4 + len > tail.len() {
+            break;
+        }
+        out.push(PcpOption {
+            code,
+            data: tail[4..4 + len].to_vec(),
+        });
+        let end = (4 + len + 3) & !3;
+        tail = &tail[end.min(tail.len())..];
+    }
+    out
+}
+
 /// Attempts to map a port on the gateway using PCP.
 /// Will try to use the given external port if it is `Some`, otherwise it will let the gateway choose.
+/// `options` are arbitrary PCP options to attach to the request (e.g. a vendor
+/// HOSTNAME option); pass `&[]` for none.
 /// # Errors
 /// Returns a `pcp::Failure` enum which decomposes into different errors depending on the cause.
 pub async fn port_mapping(
@@ -281,6 +326,7 @@ pub async fn port_mapping(
     session_nonce: Option<Nonce>,
     suggested_external_ip: Option<IpAddr>,
     mapping_options: PortMappingOptions,
+    options: &[PcpOption],
 ) -> Result<PortMapping, Failure> {
     // Create a mapping range for a single port.
     let map_range = MappingRange::Single {
@@ -298,6 +344,7 @@ pub async fn port_mapping(
         external_port,
         external_ip,
         timeout_config,
+        response_options,
         ..
     } = port_mapping_internal(
         base.gateway,
@@ -306,6 +353,7 @@ pub async fn port_mapping(
         map_range,
         mapping_options.lifetime_seconds,
         mapping_options.timeout_config,
+        options,
     )
     .await?;
 
@@ -328,6 +376,8 @@ pub async fn port_mapping(
             external_ip,
         },
         timeout_config,
+        request_options: options.to_vec(),
+        response_options,
     })
 }
 
@@ -395,6 +445,7 @@ pub async fn port_mapping_all_ports(
         map_range,
         lifetime_seconds,
         timeout_config,
+        &[],
     )
     .await?;
 
@@ -436,6 +487,7 @@ pub async fn try_drop_mapping(
     nonce: Nonce,
     drop_map_range: DropMappingRange,
     timeout_config: Option<TimeoutConfig>,
+    options: &[PcpOption],
 ) -> Result<(), Failure> {
     // Create a port mapping range depending on the which type was requested.
     let map_range = match drop_map_range {
@@ -465,6 +517,7 @@ pub async fn try_drop_mapping(
         map_range,
         Some(0),
         timeout_config,
+        options,
     )
     .await?;
 
@@ -689,6 +742,7 @@ struct PortMappingInternal {
     pub external_port: u16,
     pub external_ip: IpAddr,
     pub timeout_config: TimeoutConfig,
+    pub response_options: Vec<PcpOption>,
 }
 
 /// Helper for attempting a port mapping with more permissive input.
@@ -704,6 +758,7 @@ async fn port_mapping_internal(
     map_range: MappingRange,
     lifetime_seconds: Option<u32>,
     timeout_config: Option<TimeoutConfig>,
+    options: &[PcpOption],
 ) -> Result<PortMappingInternal, Failure> {
     // Ensure that a lifetime of `0` is only used for valid delete requests.
     // See section 15.1, <https://www.rfc-editor.org/rfc/rfc6887#section-15.1>.
@@ -741,6 +796,7 @@ async fn port_mapping_internal(
         lifetime_seconds.unwrap_or(RECOMMENDED_MAPPING_LIFETIME_SECONDS),
         timeout_config,
         &mut recv_buffer,
+        options,
     )
     .await?;
     let n = bb.len();
@@ -792,6 +848,9 @@ async fn port_mapping_internal(
         IpAddr::V6(external_ip)
     };
 
+    // Any bytes past the fixed 60-byte MAP payload are echoed/returned options.
+    let response_options = parse_options(bb);
+
     Ok(PortMappingInternal {
         lifetime_seconds,
         gateway_epoch_seconds,
@@ -799,6 +858,7 @@ async fn port_mapping_internal(
         external_port,
         external_ip,
         timeout_config,
+        response_options,
     })
 }
 
@@ -825,24 +885,23 @@ enum MappingRange {
 /// Helper function to try to create and send a PCP request and return the gateway's response, if any.
 /// # Panics
 /// Panics if unable to construct `rand::distr::Uniform`, which should never happen since the range is valid.
-async fn try_send_map_request(
+async fn try_send_map_request<'a>(
     gateway: IpAddr,
     client: IpAddr,
     nonce: Nonce,
     map_range: MappingRange,
     lifetime_seconds: u32,
     timeout_config: TimeoutConfig,
-    recv_buffer: &mut [u8; MAX_DATAGRAM_SIZE],
-) -> Result<PcpResponse<'_>, Failure> {
+    recv_buffer: &'a mut [u8; MAX_DATAGRAM_SIZE],
+    options: &[PcpOption],
+) -> Result<PcpResponse<'a>, Failure> {
     // Create a new UDP socket to communicate with the gateway.
     let socket = helpers::new_socket(gateway)
         .await
         .map_err(Failure::Socket)?;
 
-    // Create a bitstream-friendly scratch space.
-    // NOTE: Always ensure we are allocating the exact correct size here.
-    let mut send_buffer = [0; HEADER_SIZE + 36];
-    let mut send_bb = &mut send_buffer[..];
+    // Grow as options are appended after the fixed 24+36-byte MAP payload.
+    let mut send_buffer: Vec<u8> = Vec::with_capacity(HEADER_SIZE + 36);
 
     // Write the common PCP request header.
     let suggested_ip = write_base_request(
@@ -858,28 +917,28 @@ async fn try_send_map_request(
                 ..
             } => suggested_external_ip,
         },
-        &mut send_bb,
+        &mut send_buffer,
         lifetime_seconds,
     );
 
     // Create the mapping specific request.
-    send_bb.put_u32(nonce[0]);
-    send_bb.put_u32(nonce[1]);
-    send_bb.put_u32(nonce[2]);
-    send_bb.put_u8(if let MappingRange::Single { protocol, .. } = map_range {
+    send_buffer.put_u32(nonce[0]);
+    send_buffer.put_u32(nonce[1]);
+    send_buffer.put_u32(nonce[2]);
+    send_buffer.put_u8(if let MappingRange::Single { protocol, .. } = map_range {
         protocol_to_byte(protocol)
     } else {
         0
     });
-    send_bb.put(&[0u8; 3][..]); // Reserved.
-    send_bb.put_u16(
+    send_buffer.put(&[0u8; 3][..]); // Reserved.
+    send_buffer.put_u16(
         if let MappingRange::Single { internal_port, .. } = map_range {
             internal_port.get()
         } else {
             0
         },
     );
-    send_bb.put_u16(
+    send_buffer.put_u16(
         if let MappingRange::Single {
             suggested_external_port,
             ..
@@ -890,7 +949,12 @@ async fn try_send_map_request(
             0
         },
     );
-    send_bb.put(&suggested_ip.octets()[..]);
+    send_buffer.put(&suggested_ip.octets()[..]);
+
+    // Append any caller-supplied PCP options.
+    for option in options {
+        option.encode(&mut send_buffer);
+    }
 
     // Send the request to the gateway.
     let mut recv_bb = &mut recv_buffer[..];
@@ -1255,6 +1319,7 @@ impl PortMappingAllPorts {
                 protocol: self.protocol,
             },
             Some(self.timeout_config),
+            &[],
         )
         .await
         .map_err(|e| (e, self))

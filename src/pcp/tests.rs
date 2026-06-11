@@ -339,3 +339,34 @@ fn test_write_base_request_ipv4() {
     // Suggested external IP should be IPv4-mapped unspecified when None
     assert_eq!(suggested_ip, Ipv4Addr::UNSPECIFIED.to_ipv6_mapped());
 }
+
+#[test]
+fn test_pcp_option_round_trip() {
+    // A single option encodes to code, reserved, length, data, padded to 4.
+    let opt = PcpOption {
+        code: 224,
+        data: b"git.example.com".to_vec(),
+    };
+    let mut buf = Vec::new();
+    opt.encode(&mut buf);
+    // 4 header + 15 data = 19 -> padded to 20.
+    assert_eq!(buf.len(), 20);
+    assert!(buf.len().is_multiple_of(4));
+    assert_eq!(buf[0], 224);
+    assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 15);
+
+    // Two options round-trip back through the parser.
+    let second = PcpOption {
+        code: 200,
+        data: vec![1, 2, 3],
+    };
+    second.encode(&mut buf);
+    assert_eq!(parse_options(&buf), vec![opt, second]);
+}
+
+#[test]
+fn test_parse_options_stops_on_truncation() {
+    // code, reserved, length=10 but no data: ignored, returns nothing.
+    assert!(parse_options(&[224, 0, 0, 10]).is_empty());
+    assert!(parse_options(&[]).is_empty());
+}

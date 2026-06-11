@@ -283,6 +283,8 @@ pub async fn port_mapping(
         gateway_epoch_seconds,
         mapping_type: PortMappingType::NatPmp,
         timeout_config,
+        request_options: Vec::new(),
+        response_options: Vec::new(),
     })
 }
 
