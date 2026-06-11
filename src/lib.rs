@@ -340,6 +340,15 @@ impl PortMapping {
     pub fn response_options(&self) -> &[pcp::PcpOption] {
         &self.response_options
     }
+    /// The external IP address the gateway assigned to this mapping, if known.
+    /// PCP reports it in the mapping response; NAT-PMP does not.
+    #[must_use]
+    pub fn external_ip(&self) -> Option<IpAddr> {
+        match self.mapping_type {
+            PortMappingType::Pcp { external_ip, .. } => Some(external_ip),
+            PortMappingType::NatPmp => None,
+        }
+    }
 }
 
 /// Private module for shared helper functions within the library.
