@@ -354,6 +354,7 @@ pub async fn port_mapping(
         mapping_options.lifetime_seconds,
         mapping_options.timeout_config,
         options,
+        mapping_options.gateway_scope_id,
     )
     .await?;
 
@@ -364,6 +365,7 @@ pub async fn port_mapping(
 
     Ok(PortMapping {
         gateway: base.gateway,
+        gateway_scope_id: mapping_options.gateway_scope_id,
         protocol: base.protocol,
         internal_port: base.internal_port,
         external_port,
@@ -446,6 +448,7 @@ pub async fn port_mapping_all_ports(
         lifetime_seconds,
         timeout_config,
         &[],
+        None,
     )
     .await?;
 
@@ -488,6 +491,7 @@ pub async fn try_drop_mapping(
     drop_map_range: DropMappingRange,
     timeout_config: Option<TimeoutConfig>,
     options: &[PcpOption],
+    scope_id: Option<u32>,
 ) -> Result<(), Failure> {
     // Create a port mapping range depending on the which type was requested.
     let map_range = match drop_map_range {
@@ -518,6 +522,7 @@ pub async fn try_drop_mapping(
         Some(0),
         timeout_config,
         options,
+        scope_id,
     )
     .await?;
 
@@ -592,7 +597,7 @@ pub async fn peer_mapping(
         session_nonce.unwrap_or_else(|| [rand::random(), rand::random(), rand::random()]);
 
     // Create a new UDP socket to communicate with the gateway.
-    let socket = helpers::new_socket(base.gateway)
+    let socket = helpers::new_socket(base.gateway, mapping_options.gateway_scope_id)
         .await
         .map_err(Failure::Socket)?;
 
@@ -751,6 +756,7 @@ struct PortMappingInternal {
 /// # Panics
 /// Panics if the `lifetime_seconds` is `Some(0)` and the `map_range` has a suggested external IP
 /// or a suggested external port.
+#[allow(clippy::too_many_arguments)]
 async fn port_mapping_internal(
     gateway: IpAddr,
     client: IpAddr,
@@ -759,6 +765,7 @@ async fn port_mapping_internal(
     lifetime_seconds: Option<u32>,
     timeout_config: Option<TimeoutConfig>,
     options: &[PcpOption],
+    scope_id: Option<u32>,
 ) -> Result<PortMappingInternal, Failure> {
     // Ensure that a lifetime of `0` is only used for valid delete requests.
     // See section 15.1, <https://www.rfc-editor.org/rfc/rfc6887#section-15.1>.
@@ -797,6 +804,7 @@ async fn port_mapping_internal(
         timeout_config,
         &mut recv_buffer,
         options,
+        scope_id,
     )
     .await?;
     let n = bb.len();
@@ -885,6 +893,7 @@ enum MappingRange {
 /// Helper function to try to create and send a PCP request and return the gateway's response, if any.
 /// # Panics
 /// Panics if unable to construct `rand::distr::Uniform`, which should never happen since the range is valid.
+#[allow(clippy::too_many_arguments)]
 async fn try_send_map_request<'a>(
     gateway: IpAddr,
     client: IpAddr,
@@ -894,9 +903,10 @@ async fn try_send_map_request<'a>(
     timeout_config: TimeoutConfig,
     recv_buffer: &'a mut [u8; MAX_DATAGRAM_SIZE],
     options: &[PcpOption],
+    scope_id: Option<u32>,
 ) -> Result<PcpResponse<'a>, Failure> {
     // Create a new UDP socket to communicate with the gateway.
-    let socket = helpers::new_socket(gateway)
+    let socket = helpers::new_socket(gateway, scope_id)
         .await
         .map_err(Failure::Socket)?;
 
@@ -1212,6 +1222,7 @@ impl PeerMapping {
                 external_port: Some(self.external_port),
                 lifetime_seconds: Some(self.lifetime_seconds),
                 timeout_config: Some(self.timeout_config),
+                gateway_scope_id: None,
             },
         )
         .await?;
@@ -1233,6 +1244,7 @@ impl PeerMapping {
                 external_port: None,
                 lifetime_seconds: Some(0),
                 timeout_config: Some(self.timeout_config),
+                gateway_scope_id: None,
             },
         )
         .await
@@ -1320,6 +1332,7 @@ impl PortMappingAllPorts {
             },
             Some(self.timeout_config),
             &[],
+            None,
         )
         .await
         .map_err(|e| (e, self))

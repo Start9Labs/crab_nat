@@ -130,6 +130,12 @@ pub struct PortMappingOptions {
 
     /// The configuration of the timing of UDP requests made to the gateway.
     pub timeout_config: Option<TimeoutConfig>,
+
+    /// The IPv6 scope (zone) id of the interface toward the gateway, used
+    /// when the gateway is a link-local (`fe80::`) address — a link-local
+    /// destination cannot be connected without a zone. `None` (the default)
+    /// or a non-link-local gateway leaves the zone unset. Ignored for IPv4.
+    pub gateway_scope_id: Option<u32>,
 }
 
 /// A port mapping on the gateway. Should be renewed with `.renew()` and deleted from the gateway with `.try_drop()`.
@@ -137,6 +143,9 @@ pub struct PortMappingOptions {
 pub struct PortMapping {
     /// The address of the gateway the mapping is registered with.
     gateway: IpAddr,
+
+    /// The IPv6 scope id used to reach the gateway, if any. Carried so `renew`/`try_drop` can reconnect to a link-local gateway.
+    gateway_scope_id: Option<u32>,
 
     /// The protocol the mapping is for.
     protocol: InternetProtocol,
@@ -221,6 +230,7 @@ impl PortMapping {
             external_port: Some(self.external_port),
             lifetime_seconds: Some(self.lifetime()),
             timeout_config: Some(self.timeout_config),
+            gateway_scope_id: self.gateway_scope_id,
         };
 
         // Attempt to renew the existing port mapping on the gateway.
@@ -262,6 +272,7 @@ impl PortMapping {
     /// depending on which protocol was used to create the mapping.
     pub async fn try_drop(self) -> Result<(), (MappingFailure, Self)> {
         let gateway = self.gateway();
+        let gateway_scope_id = self.gateway_scope_id();
         let protocol = self.protocol();
         let internal_port = self.internal_port();
         let mapping_type = self.mapping_type();
@@ -274,6 +285,7 @@ impl PortMapping {
                 self.protocol(),
                 Some(internal_port),
                 Some(self.timeout_config),
+                gateway_scope_id,
             )
             .await
             .map_err(|e| (MappingFailure::from(e), self)),
@@ -288,6 +300,7 @@ impl PortMapping {
                 },
                 Some(self.timeout_config),
                 &request_options,
+                gateway_scope_id,
             )
             .await
             .map_err(|e| (MappingFailure::from(e), self)),
@@ -298,6 +311,11 @@ impl PortMapping {
     #[must_use]
     pub fn gateway(&self) -> IpAddr {
         self.gateway
+    }
+    /// The IPv6 scope id used to reach the gateway, if any.
+    #[must_use]
+    pub fn gateway_scope_id(&self) -> Option<u32> {
+        self.gateway_scope_id
     }
     /// The protocol the mapping is for.
     #[must_use]
@@ -360,9 +378,14 @@ mod helpers {
     use crate::TimeoutConfig;
 
     /// Create a new UDP socket and connect it to the gateway socket address for NAT-PMP or PCP.
+    /// `scope_id` is the IPv6 zone index used to reach a link-local (`fe80::`) gateway; it is
+    /// ignored for IPv4 gateways and may be `None` when the gateway is not link-local.
     /// # Errors
     /// Will return an error if we fail to bind to a local UDP socket or connect to the gateway address.
-    pub async fn new_socket(gateway: IpAddr) -> Result<tokio::net::UdpSocket, std::io::Error> {
+    pub async fn new_socket(
+        gateway: IpAddr,
+        scope_id: Option<u32>,
+    ) -> Result<tokio::net::UdpSocket, std::io::Error> {
         use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
         // Create a new UDP with an IP protocol matching that of the gateway address.
@@ -371,7 +394,15 @@ mod helpers {
             IpAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
         })
         .await?;
-        socket.connect((gateway, crate::GATEWAY_PORT)).await?;
+
+        // A link-local IPv6 destination must carry a zone (scope) id, else the connect fails.
+        let destination = match gateway {
+            IpAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(v4, crate::GATEWAY_PORT)),
+            IpAddr::V6(v6) => {
+                SocketAddr::V6(SocketAddrV6::new(v6, crate::GATEWAY_PORT, 0, scope_id.unwrap_or(0)))
+            }
+        };
+        socket.connect(destination).await?;
 
         Ok(socket)
     }

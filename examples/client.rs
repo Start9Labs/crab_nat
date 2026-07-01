@@ -120,7 +120,7 @@ async fn main() {
 
     // If the delete all flag is set, attempt to delete all mappings for the protocol and exit.
     if args.delete_all {
-        crab_nat::natpmp::try_drop_mapping(gateway, protocol, None, None)
+        crab_nat::natpmp::try_drop_mapping(gateway, protocol, None, None, None)
             .await
             .unwrap_or_else(|e| {
                 tracing::error!("Failed to delete mappings: {e:#}");
