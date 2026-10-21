@@ -33,6 +33,12 @@ if let Err((e, m)) = mapping.try_drop().await {
 
 If there is a preference on which protocol to use then you can access the `natpmp` and `pcp` modules directly.
 
+### PCP options
+
+`pcp::port_mapping` accepts a slice of `pcp::PcpOption { code, data }` values for single-port MAP requests. The library handles option framing and padding; callers supply the option-specific payloads. Pass `&[]` for no options.
+
+Request options are retained for `PortMapping::renew` and `PortMapping::try_drop`. `PortMapping::response_options()` exposes the options from the most recent successful creation or renewal response, allowing callers to check whether a gateway applied an optional extension. Requests exceeding PCP's 1100-byte limit are rejected with `pcp::Failure::RequestTooLarge`.
+
 Crab NAT does not determine the gateway address or the local client address. This is to reduce unnecessary assumptions about how this library will be used. For an easy API to determine these values reliably, I recommend using [netdev](https://crates.io/crates/netdev); see the example [client](examples/client.rs) for basic usage.
 
 ### Crate Features
@@ -43,5 +49,5 @@ Crab NAT does not determine the gateway address or the local client address. Thi
   * https://www.rfc-editor.org/rfc/rfc6886#section-3.2.1 states that NAT-PMP clients should listen for external IP address changes from the gateway. This is not currently implemented, and I am unsure how useful this would be.
 * PCP:
   * PCP supports more protocols than just UDP and TCP which are not yet added. I'm open to supporting more protocols if they are requested.
-  * PCP defines a number of operation `Options` which are not implemented. I'm open to supporting some options if they are requested.
+  * Typed helpers for PCP operation options, and option support for PEER and all-ports mappings, are not implemented.
   * PCP describes an `Announce` operation, which I don't plan to implement.
