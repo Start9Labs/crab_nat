@@ -199,6 +199,12 @@ pub struct PortMapping {
 
     /// The configuration of the timing of UDP requests made to the gateway.
     pub timeout_config: TimeoutConfig,
+
+    /// PCP options retained for renewal and deletion.
+    request_options: Vec<pcp::PcpOption>,
+
+    /// PCP options the gateway returned in the mapping response.
+    response_options: Vec<pcp::PcpOption>,
 }
 impl PortMapping {
     /// Attempts to map a port on the gateway using PCP first and falling back to NAT-PMP.
@@ -222,6 +228,7 @@ impl PortMapping {
             None,
             None,
             mapping_options,
+            &[],
         )
         .await
         {
@@ -276,6 +283,7 @@ impl PortMapping {
                     Some(nonce),
                     Some(external_ip),
                     options,
+                    &self.request_options,
                 )
                 .await
                 .map_err(MappingFailure::from)?;
@@ -314,6 +322,7 @@ impl PortMapping {
                     protocol,
                 },
                 Some(self.timeout_config),
+                &self.request_options,
             )
             .await
             .map_err(|e| (MappingFailure::from(e), self)),
@@ -369,6 +378,12 @@ impl PortMapping {
     #[must_use]
     pub fn mapping_type(&self) -> PortMappingType {
         self.mapping_type
+    }
+    /// The PCP options from the most recent successful creation or renewal response.
+    /// Empty for NAT-PMP mappings.
+    #[must_use]
+    pub fn response_options(&self) -> &[pcp::PcpOption] {
+        &self.response_options
     }
 }
 
