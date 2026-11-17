@@ -373,6 +373,8 @@ fn test_parse_options_stops_on_truncation() {
 
 /// A server rejects a request whose source differs from the client address in its header,
 /// see <https://www.rfc-editor.org/rfc/rfc6887#section-8.2>.
+/// Requires Linux's implicit 127.0.0.0/8 loopback aliases.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_request_is_sent_from_client_address() {
     let gateway = Ipv4Addr::new(127, 0, 0, 3);
